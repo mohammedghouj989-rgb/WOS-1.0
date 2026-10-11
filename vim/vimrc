@@ -1,0 +1,64 @@
+set nocompatible
+filetype plugin indent on
+syntax on
+set number
+set tabstop=4
+set shiftwidth=4
+set expandtab
+set termguicolors
+
+call plug#begin('~/.vim/plugged')
+
+Plug 'prabirshrestha/vim-lsp'
+Plug 'prabirshrestha/asyncomplete.vim'
+Plug 'prabirshrestha/asyncomplete-lsp.vim'
+Plug 'matn/vim-lsp-settings'
+Plug 'morhetz/gruvbox'
+Plug 'psliwka/vim-smoothie'
+
+call plug#end()
+
+colorscheme gruvbox
+set background=dark
+
+" ============================================================
+" clangd (C/C++)
+" ============================================================
+if executable('clangd')
+    au User lsp_setup call lsp#register_server({
+        \ 'name': 'clangd',
+        \ 'cmd': {server_info->['clangd']},
+        \ 'whitelist': ['c', 'cpp'],
+        \ })
+endif
+
+" ============================================================
+" WOS Language Server
+" ============================================================
+if executable('node')
+    au User lsp_setup call lsp#register_server({
+        \ 'name': 'wos-ls',
+        \ 'cmd': {server_info->['node', expand('~/wos-server/server.js'), '--stdio']},
+        \ 'whitelist': ['wos'],
+        \ })
+endif
+
+" ============================================================
+" Asyncomplete settings
+" ============================================================
+let g:asyncomplete_auto_popup = 1
+let g:asyncomplete_auto_completeopt = 0
+set completeopt=menuone,noinsert,noselect
+
+" Tab to navigate completion
+inoremap <expr> <Tab> pumvisible() ? "\<C-n>" : "\<Tab>"
+inoremap <expr> <S-Tab> pumvisible() ? "\<C-p>" : "\<S-Tab>"
+inoremap <expr> <CR> pumvisible() ? "\<C-y>" : "\<CR>"
+
+" Ctrl+Space to trigger completion
+inoremap <C-Space> <C-x><C-o>
+
+" ============================================================
+" WOS Compile shortcut
+" ============================================================
+autocmd FileType wos nnoremap <F5> :!./wos %<CR>

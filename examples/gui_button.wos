@@ -1,0 +1,3 @@
+window "My App" 800 x 600;
+text "Hello from WOS" top;
+button rectangle "Click Me" center 100 x 40;

@@ -1,0 +1,17 @@
+# Compiled files
+*.o
+*.out
+compiler/wos
+compiler/output.c
+compiler/output
+
+# Node modules
+language-server/node_modules/
+
+# Generated
+output.c
+output
+
+# OS files
+.DS_Store
+Thumbs.db

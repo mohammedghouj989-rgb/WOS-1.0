@@ -1,0 +1,4 @@
+import "math.h";
+
+int x = 10;
+print(x);
