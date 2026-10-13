@@ -1,0 +1,4 @@
+print("Ownership test:");
+string s = "hello";
+string t = s;
+print(s);

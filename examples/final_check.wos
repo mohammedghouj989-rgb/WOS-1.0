@@ -1,0 +1,27 @@
+print("=== Final Check ===");
+
+print("1. Basic:");
+int x = 10;
+print(x);
+
+print("2. List:");
+list arr = [100, 200, 300];
+print(arr[0]);
+print(arr[1]);
+print(arr[2]);
+
+print("3. Function:");
+function add(int a, int b) {
+    return a + b;
+}
+int result = add(5, 7);
+print(result);
+
+print("4. Struct:");
+struct Point {
+    int x;
+    int y;
+}
+Point p = Point(50, 60);
+print(p.x);
+print(p.y);

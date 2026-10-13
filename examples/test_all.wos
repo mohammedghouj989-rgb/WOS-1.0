@@ -1,0 +1,18 @@
+print("=== WOS Full Test ===");
+
+print("1. Basic:");
+int x = 10;
+print(x);
+
+print("2. List:");
+list arr = [10, 20, 30];
+print(arr[0]);
+print(arr[1]);
+print(arr[2]);
+
+print("3. Function:");
+function add(int a, int b) {
+    return a + b;
+}
+int result = add(3, 7);
+print(result);

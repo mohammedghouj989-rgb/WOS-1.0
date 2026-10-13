@@ -1,0 +1,900 @@
+// ============================================================
+// WOS PARSER — Manual Memory Version
+// Written by: CCODE
+// PART 1 of 3
+// ============================================================
+
+#include "WOS.c"
+
+// ============================================================
+// AST NODE TYPES
+// ============================================================
+typedef enum {
+    AST_PROGRAM,
+    AST_LIBRARY,
+    AST_IMPORT,
+    AST_STRUCT_DEF,
+    AST_DECLARATION,
+    AST_ASSIGNMENT,
+    AST_MEMBER_ASSIGN,
+    AST_LIST_ASSIGN,
+    AST_DEREF_ASSIGN,
+    AST_IF,
+    AST_WHILE,
+    AST_FOR,
+    AST_FUNCTION,
+    AST_FUNCTION_CALL,
+    AST_MEMBER_ACCESS,
+    AST_LIST_ACCESS,
+    AST_LIST_INIT,
+    AST_STRUCT_INIT,
+    AST_DEREF,
+    AST_ADDRESS_OF,
+    AST_ALLOC,
+    AST_FREE,
+    AST_RETURN,
+    AST_BLOCK,
+    AST_EXPRESSION,
+    AST_STRING,
+    AST_STRING_VAR,
+    AST_GUI_BUTTON,
+    AST_GUI_TEXT,
+    AST_GUI_INPUT
+} ASTNodeType;
+
+// ============================================================
+// AST NODE STRUCTURE
+// ============================================================
+typedef struct ASTNode {
+    ASTNodeType type;
+    char *value;
+    int line;
+    int column;
+    struct ASTNode **children;
+    int child_count;
+    int child_capacity;
+} ASTNode;
+
+// ============================================================
+// AST CREATE / ADD / FREE
+// ============================================================
+ASTNode *ast_create(ASTNodeType type, char *value, int line, int column) {
+    ASTNode *node = malloc(sizeof(ASTNode));
+    node->type = type;
+    node->value = value ? strdup(value) : NULL;
+    node->line = line;
+    node->column = column;
+    node->child_count = 0;
+    node->child_capacity = 4;
+    node->children = malloc(sizeof(ASTNode*) * node->child_capacity);
+    return node;
+}
+
+void ast_add_child(ASTNode *parent, ASTNode *child) {
+    if (!parent || !child) return;
+    if (parent->child_count >= parent->child_capacity) {
+        parent->child_capacity *= 2;
+        parent->children = realloc(parent->children,
+            sizeof(ASTNode*) * parent->child_capacity);
+    }
+    parent->children[parent->child_count++] = child;
+}
+
+void ast_free(ASTNode *node) {
+    if (!node) return;
+    for (int i = 0; i < node->child_count; i++) ast_free(node->children[i]);
+    free(node->children);
+    free(node->value);
+    free(node);
+}
+
+// ============================================================
+// PARSER STRUCTURE
+// ============================================================
+typedef struct {
+    Token *tokens;
+    int token_count;
+    int position;
+    int has_error;
+} Parser;
+
+// ============================================================
+// PARSER HELPERS
+// ============================================================
+Token parser_peek(Parser *p) { return p->tokens[p->position]; }
+
+Token parser_peek_next(Parser *p) {
+    if (p->position + 1 < p->token_count) return p->tokens[p->position + 1];
+    return p->tokens[p->position];
+}
+
+Token parser_advance(Parser *p) {
+    Token t = p->tokens[p->position];
+    if (p->position < p->token_count - 1) p->position++;
+    return t;
+}
+
+int parser_check(Parser *p, TokenType type) {
+    return parser_peek(p).type == type;
+}
+
+int parser_check_keyword(Parser *p, char *kw) {
+    Token t = parser_peek(p);
+    return t.type == TOKEN_KEYWORD && t.value && strcmp(t.value, kw) == 0;
+}
+
+int parser_check_punct(Parser *p, char c) {
+    Token t = parser_peek(p);
+    return t.type == TOKEN_PUNCTUATION && t.value && t.value[0] == c;
+}
+
+int parser_check_operator(Parser *p, char *op) {
+    Token t = parser_peek(p);
+    return t.type == TOKEN_OPERATOR && t.value && strcmp(t.value, op) == 0;
+}
+
+Token parser_expect(Parser *p, TokenType type, char *error) {
+    if (parser_check(p, type)) return parser_advance(p);
+    Token t = parser_peek(p);
+    printf("Parse Error at line %d, col %d: %s\n", t.line, t.column, error);
+    p->has_error = 1;
+    Token err;
+    err.type = TOKEN_EOF;
+    err.value = NULL;
+    err.line = t.line;
+    err.column = t.column;
+    return err;
+}
+
+Token parser_expect_punct(Parser *p, char c, char *error) {
+    if (parser_check_punct(p, c)) return parser_advance(p);
+    Token t = parser_peek(p);
+    printf("Parse Error at line %d, col %d: %s\n", t.line, t.column, error);
+    p->has_error = 1;
+    Token err;
+    err.type = TOKEN_EOF;
+    err.value = NULL;
+    err.line = t.line;
+    err.column = t.column;
+    return err;
+}
+
+// ============================================================
+// FORWARD DECLARATIONS
+// ============================================================
+ASTNode *parse_comparison(Parser *p);
+ASTNode *parse_expression(Parser *p);
+ASTNode *parse_term(Parser *p);
+ASTNode *parse_factor(Parser *p);
+ASTNode *parse_block(Parser *p);
+ASTNode *parse_statement(Parser *p);
+ASTNode *parse_struct_def(Parser *p);
+
+// ============================================================
+// PARSE FACTOR
+// ============================================================
+ASTNode *parse_factor(Parser *p) {
+    Token t = parser_peek(p);
+
+    // Number
+    if (t.type == TOKEN_NUMBER) {
+        parser_advance(p);
+        return ast_create(AST_EXPRESSION, t.value, t.line, t.column);
+    }
+
+    // String literal
+    if (t.type == TOKEN_STRING) {
+        parser_advance(p);
+        return ast_create(AST_STRING, t.value, t.line, t.column);
+    }
+
+    // Address-of: &x
+    if (t.type == TOKEN_OPERATOR && t.value && strcmp(t.value, "&") == 0) {
+        parser_advance(p);
+        Token name = parser_expect(p, TOKEN_IDENTIFIER, "expected name after &");
+        return ast_create(AST_ADDRESS_OF, name.value, t.line, t.column);
+    }
+
+    // Dereference: *p
+    if (t.type == TOKEN_OPERATOR && t.value && strcmp(t.value, "*") == 0) {
+        parser_advance(p);
+        ASTNode *operand = parse_factor(p);
+        ASTNode *node = ast_create(AST_DEREF, NULL, t.line, t.column);
+        ast_add_child(node, operand);
+        return node;
+    }
+
+    // alloc(size) as expression
+if (t.type == TOKEN_KEYWORD && t.value && strcmp(t.value, "alloc") == 0) {
+    parser_advance(p);
+    parser_expect_punct(p, '(', "expected '(' after alloc");
+    ASTNode *size = parse_comparison(p);
+    parser_expect_punct(p, ')', "expected ')'");
+    ASTNode *node = ast_create(AST_EXPRESSION, "alloc", t.line, t.column);
+    if (size) ast_add_child(node, size);
+    return node;
+}
+
+// free(ptr) as expression
+if (t.type == TOKEN_KEYWORD && t.value && strcmp(t.value, "free") == 0) {
+    parser_advance(p);
+    parser_expect_punct(p, '(', "expected '(' after free");
+    ASTNode *arg = parse_comparison(p);
+    parser_expect_punct(p, ')', "expected ')'");
+    ASTNode *node = ast_create(AST_EXPRESSION, "free", t.line, t.column);
+    if (arg) ast_add_child(node, arg);
+    return node;
+}
+
+
+    // Identifier
+    if (t.type == TOKEN_IDENTIFIER) {
+        parser_advance(p);
+
+        // Function call
+        if (parser_check_punct(p, '(')) {
+            parser_advance(p);
+            ASTNode *node = ast_create(AST_FUNCTION_CALL, t.value, t.line, t.column);
+            while (!parser_check_punct(p, ')') && !parser_check(p, TOKEN_EOF)) {
+                ASTNode *arg = parse_comparison(p);
+                if (arg) ast_add_child(node, arg);
+                if (parser_check_punct(p, ',')) parser_advance(p);
+                else break;
+            }
+            parser_expect_punct(p, ')', "expected ')'");
+            return node;
+        }
+
+        // Member access
+        if (parser_check_punct(p, '.')) {
+            parser_advance(p);
+            Token member = parser_expect(p, TOKEN_IDENTIFIER, "expected member name");
+            ASTNode *obj = ast_create(AST_EXPRESSION, t.value, t.line, t.column);
+            ASTNode *node = ast_create(AST_MEMBER_ACCESS, member.value, t.line, t.column);
+            ast_add_child(node, obj);
+            return node;
+        }
+
+        // List access
+        if (parser_check_punct(p, '[')) {
+            parser_advance(p);
+            ASTNode *index = parse_comparison(p);
+            parser_expect_punct(p, ']', "expected ']'");
+            ASTNode *arr = ast_create(AST_EXPRESSION, t.value, t.line, t.column);
+            ASTNode *node = ast_create(AST_LIST_ACCESS, NULL, t.line, t.column);
+            ast_add_child(node, arr);
+            if (index) ast_add_child(node, index);
+            return node;
+        }
+
+        return ast_create(AST_EXPRESSION, t.value, t.line, t.column);
+    }
+
+    // List literal
+    if (parser_check_punct(p, '[')) {
+        parser_advance(p);
+        ASTNode *node = ast_create(AST_LIST_INIT, NULL, t.line, t.column);
+        while (!parser_check_punct(p, ']') && !parser_check(p, TOKEN_EOF)) {
+            ASTNode *item = parse_comparison(p);
+            if (item) ast_add_child(node, item);
+            if (parser_check_punct(p, ',')) parser_advance(p);
+            else break;
+        }
+        parser_expect_punct(p, ']', "expected ']'");
+        return node;
+    }
+
+    // Parentheses
+    if (parser_check_punct(p, '(')) {
+        parser_advance(p);
+        ASTNode *expr = parse_comparison(p);
+        parser_expect_punct(p, ')', "expected ')'");
+        return expr;
+    }
+
+    printf("Parse Error at line %d, col %d: unexpected token in expression\n",
+           t.line, t.column);
+    p->has_error = 1;
+    return NULL;
+}
+
+// ============================================================
+// PARSE TERM
+// ============================================================
+ASTNode *parse_term(Parser *p) {
+    ASTNode *left = parse_factor(p);
+    if (!left) return NULL;
+    while (parser_check(p, TOKEN_OPERATOR)) {
+        Token op = parser_peek(p);
+        if (!op.value) break;
+        if (op.value[0] == '*' || op.value[0] == '/' || op.value[0] == '%') {
+            parser_advance(p);
+            ASTNode *right = parse_factor(p);
+            if (!right) return left;
+            ASTNode *node = ast_create(AST_EXPRESSION, op.value, op.line, op.column);
+            ast_add_child(node, left);
+            ast_add_child(node, right);
+            left = node;
+        } else break;
+    }
+    return left;
+}
+
+// ============================================================
+// PARSE EXPRESSION
+// ============================================================
+ASTNode *parse_expression(Parser *p) {
+    ASTNode *left = parse_term(p);
+    if (!left) return NULL;
+    while (parser_check(p, TOKEN_OPERATOR)) {
+        Token op = parser_peek(p);
+        if (!op.value) break;
+        if (op.value[0] == '+' || op.value[0] == '-') {
+            parser_advance(p);
+            ASTNode *right = parse_term(p);
+            if (!right) return left;
+            ASTNode *node = ast_create(AST_EXPRESSION, op.value, op.line, op.column);
+            ast_add_child(node, left);
+            ast_add_child(node, right);
+            left = node;
+        } else break;
+    }
+    return left;
+}
+
+// ============================================================
+// PARSE COMPARISON
+// ============================================================
+ASTNode *parse_comparison(Parser *p) {
+    ASTNode *left = parse_expression(p);
+    if (!left) return NULL;
+    while (parser_check(p, TOKEN_OPERATOR)) {
+        Token op = parser_peek(p);
+        if (!op.value) break;
+        if (strcmp(op.value, ">")  == 0 || strcmp(op.value, "<")  == 0 ||
+            strcmp(op.value, ">=") == 0 || strcmp(op.value, "<=") == 0 ||
+            strcmp(op.value, "==") == 0 || strcmp(op.value, "!=") == 0) {
+            parser_advance(p);
+            ASTNode *right = parse_expression(p);
+            if (!right) return left;
+            ASTNode *node = ast_create(AST_EXPRESSION, op.value, op.line, op.column);
+            ast_add_child(node, left);
+            ast_add_child(node, right);
+            left = node;
+        } else break;
+    }
+    return left;
+}
+
+// ============================================================
+// PARSE STRUCT DEFINITION
+// ============================================================
+ASTNode *parse_struct_def(Parser *p) {
+    Token struct_tok = parser_advance(p);
+    Token name = parser_expect(p, TOKEN_IDENTIFIER, "expected struct name");
+    parser_expect_punct(p, '{', "expected '{'");
+
+    ASTNode *node = ast_create(AST_STRUCT_DEF, name.value,
+                               struct_tok.line, struct_tok.column);
+
+    while (!parser_check_punct(p, '}') && !parser_check(p, TOKEN_EOF)) {
+        Token field_type = parser_expect(p, TOKEN_KEYWORD, "expected field type");
+        Token field_name = parser_expect(p, TOKEN_IDENTIFIER, "expected field name");
+        parser_expect_punct(p, ';', "expected ';'");
+
+        ASTNode *field = ast_create(AST_EXPRESSION, field_name.value,
+                                    field_name.line, field_name.column);
+        ast_add_child(field, ast_create(AST_EXPRESSION, field_type.value,
+                                        field_type.line, field_type.column));
+        ast_add_child(node, field);
+    }
+
+    parser_expect_punct(p, '}', "expected '}'");
+    return node;
+}
+
+// ============================================================
+// PARSE DECLARATION
+// ============================================================
+ASTNode *parse_declaration(Parser *p) {
+    Token type_token = parser_advance(p);
+
+    // Check for pointer type (void*, int*, etc.)
+    if (parser_check_operator(p, "*")) {
+        parser_advance(p);
+        char *ptr_type = malloc(strlen(type_token.value) + 2);
+        strcpy(ptr_type, type_token.value);
+        strcat(ptr_type, "*");
+        type_token.value = ptr_type;
+    }
+
+    Token name = parser_expect(p, TOKEN_IDENTIFIER, "expected name");
+
+    printf("DEBUG_DECL: name='%s', next.type=%d, next.value='%s'\n",
+       name.value,
+       parser_peek(p).type,
+       parser_peek(p).value ? parser_peek(p).value : "NULL");
+
+    ASTNode *node = ast_create(AST_DECLARATION, type_token.value,
+                               type_token.line, type_token.column);
+    ast_add_child(node, ast_create(AST_EXPRESSION, name.value,
+                                   name.line, name.column));
+
+    // Check for '=' (initializer)
+    Token next = parser_peek(p);
+    if (next.type == TOKEN_OPERATOR && next.value && strcmp(next.value, "=") == 0) {
+        parser_advance(p);
+        ASTNode *value = parse_comparison(p);
+        if (value) ast_add_child(node, value);
+    }
+
+    parser_expect_punct(p, ';', "expected ';'");
+    return node;
+}
+
+// ============================================================
+// PARSE ALLOC
+// ============================================================
+ASTNode *parse_alloc(Parser *p) {
+    Token alloc_tok = parser_advance(p);
+    Token name = parser_expect(p, TOKEN_IDENTIFIER, "expected name after alloc");
+    parser_expect(p, TOKEN_OPERATOR, "expected '='");
+    parser_advance(p);  // alloc
+    parser_expect_punct(p, '(', "expected '('");
+    ASTNode *size = parse_comparison(p);
+    parser_expect_punct(p, ')', "expected ')'");
+    parser_expect_punct(p, ';', "expected ';'");
+
+    ASTNode *node = ast_create(AST_ALLOC, name.value,
+                               alloc_tok.line, alloc_tok.column);
+    if (size) ast_add_child(node, size);
+    return node;
+}
+
+// ============================================================
+// PARSE FREE
+// ============================================================
+ASTNode *parse_free(Parser *p) {
+    Token free_tok = parser_advance(p);
+    parser_expect_punct(p, '(', "expected '('");
+    Token name = parser_expect(p, TOKEN_IDENTIFIER, "expected name after free");
+    parser_expect_punct(p, ')', "expected ')'");
+    parser_expect_punct(p, ';', "expected ';'");
+
+    return ast_create(AST_FREE, name.value,
+                      free_tok.line, free_tok.column);
+}
+
+// ============================================================
+// PARSE ASSIGNMENT
+// ============================================================
+ASTNode *parse_assignment(Parser *p) {
+    Token name = parser_advance(p);
+
+    // Member assignment: p.x = ...
+    if (parser_check_punct(p, '.')) {
+        parser_advance(p);
+        Token member = parser_expect(p, TOKEN_IDENTIFIER, "expected member name");
+        parser_expect(p, TOKEN_OPERATOR, "expected '='");
+
+        ASTNode *node = ast_create(AST_MEMBER_ASSIGN, member.value,
+                                   name.line, name.column);
+        ast_add_child(node, ast_create(AST_EXPRESSION, name.value,
+                                       name.line, name.column));
+        ASTNode *value = parse_comparison(p);
+        if (value) ast_add_child(node, value);
+        parser_expect_punct(p, ';', "expected ';'");
+        return node;
+    }
+
+    // List assignment: arr[i] = ...
+    if (parser_check_punct(p, '[')) {
+        parser_advance(p);
+        ASTNode *index = parse_comparison(p);
+        parser_expect_punct(p, ']', "expected ']'");
+        parser_expect(p, TOKEN_OPERATOR, "expected '='");
+
+        ASTNode *node = ast_create(AST_LIST_ASSIGN, NULL,
+                                   name.line, name.column);
+        ast_add_child(node, ast_create(AST_EXPRESSION, name.value,
+                                       name.line, name.column));
+        if (index) ast_add_child(node, index);
+        ASTNode *value = parse_comparison(p);
+        if (value) ast_add_child(node, value);
+        parser_expect_punct(p, ';', "expected ';'");
+        return node;
+    }
+
+    // Regular assignment
+    parser_expect(p, TOKEN_OPERATOR, "expected '='");
+    ASTNode *node = ast_create(AST_ASSIGNMENT, name.value,
+                               name.line, name.column);
+    ASTNode *value = parse_comparison(p);
+    if (value) ast_add_child(node, value);
+    parser_expect_punct(p, ';', "expected ';'");
+    return node;
+}
+
+// ============================================================
+// PARSE DEREF ASSIGNMENT: *p = value;
+// ============================================================
+ASTNode *parse_deref_assign(Parser *p) {
+    Token star = parser_advance(p);  // *
+    Token name = parser_expect(p, TOKEN_IDENTIFIER, "expected name after *");
+    parser_expect(p, TOKEN_OPERATOR, "expected '='");
+
+    ASTNode *node = ast_create(AST_DEREF_ASSIGN, name.value,
+                               star.line, star.column);
+    ASTNode *value = parse_comparison(p);
+    if (value) ast_add_child(node, value);
+    parser_expect_punct(p, ';', "expected ';'");
+    return node;
+}
+
+// ============================================================
+// PARSE PRINT
+// ============================================================
+ASTNode *parse_print(Parser *p) {
+    Token print_tok = parser_advance(p);
+    parser_expect_punct(p, '(', "expected '(' after print");
+
+    ASTNode *node = ast_create(AST_EXPRESSION, "print",
+                               print_tok.line, print_tok.column);
+    ASTNode *arg = parse_comparison(p);
+    if (arg) ast_add_child(node, arg);
+
+    parser_expect_punct(p, ')', "expected ')'");
+    parser_expect_punct(p, ';', "expected ';'");
+    return node;
+}
+
+// ============================================================
+// PARSE RETURN
+// ============================================================
+ASTNode *parse_return(Parser *p) {
+    Token ret_tok = parser_advance(p);
+    ASTNode *node = ast_create(AST_RETURN, NULL, ret_tok.line, ret_tok.column);
+    if (!parser_check_punct(p, ';')) {
+        ASTNode *value = parse_comparison(p);
+        if (value) ast_add_child(node, value);
+    }
+    parser_expect_punct(p, ';', "expected ';'");
+    return node;
+}
+
+// ============================================================
+// PARSE IF
+// ============================================================
+ASTNode *parse_if(Parser *p) {
+    Token if_tok = parser_advance(p);
+    ASTNode *condition = parse_comparison(p);
+    ASTNode *then_block = parse_block(p);
+
+    ASTNode *node = ast_create(AST_IF, NULL, if_tok.line, if_tok.column);
+    ast_add_child(node, condition);
+    ast_add_child(node, then_block);
+
+    if (parser_check_keyword(p, "else")) {
+        parser_advance(p);
+        ASTNode *else_block = parse_block(p);
+        ast_add_child(node, else_block);
+    }
+    return node;
+}
+
+// ============================================================
+// PARSE WHILE
+// ============================================================
+ASTNode *parse_while(Parser *p) {
+    Token while_tok = parser_advance(p);
+    ASTNode *condition = parse_comparison(p);
+    ASTNode *block = parse_block(p);
+
+    ASTNode *node = ast_create(AST_WHILE, NULL, while_tok.line, while_tok.column);
+    ast_add_child(node, condition);
+    ast_add_child(node, block);
+    return node;
+}
+
+// ============================================================
+// PARSE FOR
+// ============================================================
+ASTNode *parse_for(Parser *p) {
+    Token for_tok = parser_advance(p);
+    parser_expect_punct(p, '(', "expected '(' after for");
+
+    ASTNode *init = parse_declaration(p);
+    ASTNode *condition = parse_comparison(p);
+    parser_expect_punct(p, ';', "expected ';'");
+    ASTNode *increment = parse_expression(p);
+    parser_expect_punct(p, ')', "expected ')'");
+    ASTNode *block = parse_block(p);
+
+    ASTNode *node = ast_create(AST_FOR, NULL, for_tok.line, for_tok.column);
+    ast_add_child(node, init);
+    ast_add_child(node, condition);
+    ast_add_child(node, increment);
+    ast_add_child(node, block);
+    return node;
+}
+
+// ============================================================
+// PARSE FUNCTION
+// ============================================================
+ASTNode *parse_function(Parser *p) {
+    Token fn_tok = parser_advance(p);
+    Token name = parser_expect(p, TOKEN_IDENTIFIER, "expected name");
+    parser_expect_punct(p, '(', "expected '('");
+
+    ASTNode *params = ast_create(AST_EXPRESSION, "params",
+                                 fn_tok.line, fn_tok.column);
+    while (!parser_check_punct(p, ')') && !parser_check(p, TOKEN_EOF)) {
+        Token ptype = parser_expect(p, TOKEN_KEYWORD, "expected param type");
+        Token pname = parser_expect(p, TOKEN_IDENTIFIER, "expected param name");
+        ASTNode *param = ast_create(AST_EXPRESSION, pname.value,
+                                    ptype.line, ptype.column);
+        ast_add_child(param, ast_create(AST_EXPRESSION, ptype.value,
+                                        ptype.line, ptype.column));
+        ast_add_child(params, param);
+        if (parser_check_punct(p, ',')) parser_advance(p);
+        else break;
+    }
+    parser_expect_punct(p, ')', "expected ')'");
+
+    ASTNode *block = parse_block(p);
+
+    ASTNode *node = ast_create(AST_FUNCTION, name.value,
+                               fn_tok.line, fn_tok.column);
+    ast_add_child(node, params);
+    ast_add_child(node, block);
+    return node;
+}
+
+// ============================================================
+// PARSE BLOCK
+// ============================================================
+ASTNode *parse_block(Parser *p) {
+    Token open = parser_expect_punct(p, '{', "expected '{'");
+    ASTNode *block = ast_create(AST_BLOCK, NULL, open.line, open.column);
+
+    while (1) {
+        Token t = parser_peek(p);
+        if (t.type == TOKEN_EOF) break;
+        if (t.type == TOKEN_PUNCTUATION && t.value && t.value[0] == '}') break;
+        int before = p->position;
+        ASTNode *stmt = parse_statement(p);
+        if (stmt) ast_add_child(block, stmt);
+        if (p->position == before) break;
+    }
+
+    parser_expect_punct(p, '}', "expected '}'");
+    return block;
+}
+
+// ============================================================
+// PARSE LIBRARY
+// ============================================================
+ASTNode *parse_library(Parser *p) {
+    Token lib_tok = parser_advance(p);
+    Token name = parser_expect(p, TOKEN_STRING, "expected library name");
+    ASTNode *node = ast_create(AST_LIBRARY, name.value,
+                               lib_tok.line, lib_tok.column);
+    parser_expect_punct(p, ';', "expected ';'");
+    return node;
+}
+
+// ============================================================
+// PARSE IMPORT
+// ============================================================
+ASTNode *parse_import(Parser *p) {
+    Token import_tok = parser_advance(p);
+    Token name = parser_expect(p, TOKEN_STRING, "expected module name");
+    ASTNode *node = ast_create(AST_IMPORT, name.value,
+                               import_tok.line, import_tok.column);
+    parser_expect_punct(p, ';', "expected ';'");
+    return node;
+}
+
+// ============================================================
+// PARSE GUI
+// ============================================================
+ASTNode *parse_gui(Parser *p) {
+    Token type = parser_advance(p);
+
+    if (strcmp(type.value, "button") == 0) {
+        Token shape = parser_expect(p, TOKEN_KEYWORD, "expected shape");
+        Token text = parser_expect(p, TOKEN_STRING, "expected text");
+        Token position = parser_expect(p, TOKEN_KEYWORD, "expected position");
+        ASTNode *node = ast_create(AST_GUI_BUTTON, text.value,
+                                   type.line, type.column);
+        ast_add_child(node, ast_create(AST_EXPRESSION, shape.value,
+                                       shape.line, shape.column));
+        ast_add_child(node, ast_create(AST_EXPRESSION, position.value,
+                                       position.line, position.column));
+        if (parser_check(p, TOKEN_NUMBER)) {
+            Token w = parser_advance(p);
+            parser_expect(p, TOKEN_IDENTIFIER, "expected 'x'");
+            Token h = parser_expect(p, TOKEN_NUMBER, "expected height");
+            ast_add_child(node, ast_create(AST_EXPRESSION, w.value,
+                                           w.line, w.column));
+            ast_add_child(node, ast_create(AST_EXPRESSION, h.value,
+                                           h.line, h.column));
+        }
+        return node;
+    }
+
+    if (strcmp(type.value, "text") == 0) {
+        Token text = parser_expect(p, TOKEN_STRING, "expected text");
+        Token position = parser_expect(p, TOKEN_KEYWORD, "expected position");
+        ASTNode *node = ast_create(AST_GUI_TEXT, text.value,
+                                   type.line, type.column);
+        ast_add_child(node, ast_create(AST_EXPRESSION, position.value,
+                                       position.line, position.column));
+        return node;
+    }
+
+    if (strcmp(type.value, "input") == 0) {
+        Token text = parser_expect(p, TOKEN_STRING, "expected text");
+        Token position = parser_expect(p, TOKEN_KEYWORD, "expected position");
+        ASTNode *node = ast_create(AST_GUI_INPUT, text.value,
+                                   type.line, type.column);
+        ast_add_child(node, ast_create(AST_EXPRESSION, position.value,
+                                       position.line, position.column));
+        return node;
+    }
+
+    printf("Parse Error at line %d: unknown GUI keyword '%s'\n",
+           type.line, type.value);
+    p->has_error = 1;
+    return NULL;
+}
+
+// ============================================================
+// PARSE STATEMENT (DISPATCHER)
+// ============================================================
+ASTNode *parse_statement(Parser *p) {
+    Token t = parser_peek(p);
+
+    // Deref assignment: *p = value;
+    if (t.type == TOKEN_OPERATOR && t.value && strcmp(t.value, "*") == 0) {
+        Token next = parser_peek_next(p);
+        if (next.type == TOKEN_IDENTIFIER) {
+            Token after = p->tokens[p->position + 2];
+            if (after.type == TOKEN_OPERATOR && after.value &&
+                strcmp(after.value, "=") == 0) {
+                return parse_deref_assign(p);
+            }
+        }
+    }
+
+    if (t.type == TOKEN_KEYWORD && t.value) {
+        // Struct definitions
+        if (strcmp(t.value, "struct") == 0) return parse_struct_def(p);
+        if (strcmp(t.value, "library") == 0) return parse_library(p);
+        if (strcmp(t.value, "import") == 0) return parse_import(p);
+        if (strcmp(t.value, "use") == 0) return parse_import(p);
+
+        // Memory
+        if (strcmp(t.value, "alloc") == 0) return parse_alloc(p);
+        if (strcmp(t.value, "free") == 0) return parse_free(p);
+
+        // Type declarations
+        if (strcmp(t.value, "int")    == 0 ||
+            strcmp(t.value, "float")  == 0 ||
+            strcmp(t.value, "double") == 0 ||
+            strcmp(t.value, "bool")   == 0 ||
+            strcmp(t.value, "string") == 0 ||
+            strcmp(t.value, "void")   == 0 ||
+            strcmp(t.value, "list")   == 0) {
+            return parse_declaration(p);
+        }
+
+        // Statements
+        if (strcmp(t.value, "print")    == 0) return parse_print(p);
+        if (strcmp(t.value, "if")       == 0) return parse_if(p);
+        if (strcmp(t.value, "while")    == 0) return parse_while(p);
+        if (strcmp(t.value, "for")      == 0) return parse_for(p);
+        if (strcmp(t.value, "function") == 0) return parse_function(p);
+        if (strcmp(t.value, "return")   == 0) return parse_return(p);
+
+        // GUI
+        if (strcmp(t.value, "button")   == 0 ||
+            strcmp(t.value, "text")     == 0 ||
+            strcmp(t.value, "input")    == 0) return parse_gui(p);
+    }
+
+    // Block
+    if (parser_check_punct(p, '{')) return parse_block(p);
+
+    // Assignment / Member assignment / List assignment
+    if (t.type == TOKEN_IDENTIFIER) {
+        Token next = parser_peek_next(p);
+        if (next.type == TOKEN_OPERATOR && next.value && strcmp(next.value, "=") == 0) {
+            return parse_assignment(p);
+        }
+        if (next.type == TOKEN_PUNCTUATION && next.value &&
+            (next.value[0] == '.' || next.value[0] == '[')) {
+            return parse_assignment(p);
+        }
+    }
+
+    // Expression statement
+    ASTNode *expr = parse_comparison(p);
+    if (expr) parser_expect_punct(p, ';', "expected ';'");
+    return expr;
+}
+
+// ============================================================
+// PARSE PROGRAM
+// ============================================================
+ASTNode *parse_program(Parser *p) {
+    ASTNode *program = ast_create(AST_PROGRAM, NULL, 1, 1);
+
+    while (!parser_check(p, TOKEN_EOF)) {
+        Token t = parser_peek(p);
+        if (t.type == TOKEN_KEYWORD && (!t.value || t.value[0] == '\0')) {
+            parser_advance(p);
+            continue;
+        }
+        int before = p->position;
+        ASTNode *stmt = parse_statement(p);
+        if (stmt) ast_add_child(program, stmt);
+        if (p->position == before) break;
+    }
+    return program;
+}
+
+// ============================================================
+// INCLUDE CODEGEN
+// ============================================================
+#include "codegen.c"
+
+// ============================================================
+// MAIN
+// ============================================================
+int main(int argc, char **argv) {
+    if (argc < 2) {
+        printf("Usage: %s <file.wos>\n", argv[0]);
+        return 1;
+    }
+
+    char *source = read_file(argv[1]);
+    if (!source) return 1;
+
+    Lexer *lexer = lexer_create(source);
+    lexer_tokenize_all(lexer);
+
+    if (lexer->has_error) {
+        printf("Lexer errors found.\n");
+        lexer_free(lexer);
+        free(source);
+        return 1;
+    }
+
+    Parser parser;
+    parser.tokens = lexer->tokens;
+    parser.token_count = lexer->token_count;
+    parser.position = 0;
+    parser.has_error = 0;
+
+    ASTNode *program = parse_program(&parser);
+
+    if (parser.has_error) {
+        printf("Errors found during parsing.\n");
+        ast_free(program);
+        lexer_free(lexer);
+        free(source);
+        return 1;
+    }
+
+    cg_generate(program, "output.c");
+
+    int ret = system("clang output.c -o output 2>/dev/null");
+    if (ret == 0) system("./output");
+    else printf("Note: Could not compile output.c\n");
+
+    ast_free(program);
+    lexer_free(lexer);
+    free(source);
+    return 0;
+}

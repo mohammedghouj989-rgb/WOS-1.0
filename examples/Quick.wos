@@ -1,0 +1,7 @@
+int age = 5;
+
+if (age < 5) {
+print("Tiny");
+} else{
+print("child");
+}
